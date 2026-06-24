@@ -17,7 +17,7 @@ version_extractors:
 common: &common
   package_name: "procman"
   maintainer: "Oleg Antonyan <oleg.b.antonyan@gmail.com>"
-  homepage: "https://github.com/olegantonyan/procman"
+  homepage: "https://github.com/a-chacon/procman"
   description: "Terminal UI for managing Procfile-based applications"
 
 ignore_source_files:
