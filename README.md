@@ -35,7 +35,11 @@ For now, you can install `procman` via [Cargo](https://doc.rust-lang.org/cargo/g
 cargo install proc-man
 ```
 
-(Releases and pre-compiled executables coming soon.)
+Or with the official script (Linux and MacOS for the momment):
+
+```
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/a-chacon/procman/releases/latest/download/proc-man-installer.sh | sh
+```
 
 ## Quick Start
 
@@ -50,7 +54,30 @@ cargo install proc-man
 
    ```bash
    procman ./path/to/my/Procfile
+
    ```
+
+## For Rails Apps
+
+To use `procman` as a drop-in replacement for Foreman in your Rails application, replace the contents of your `bin/dev` script with the following. This script automatically checks if `procman` is installed and installs it via the official installer if missing:
+
+```bash
+#!/usr/bin/env sh
+
+# Check if procman is installed; if not, install it automatically
+if ! command -v procman >/dev/null 2>&1; then
+  echo "procman not found. Installing..."
+  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/a-chacon/procman/releases/latest/download/proc-man-installer.sh | sh
+  
+  # Refresh shell path if needed (depending on shell and install location)
+fi
+
+# Default to port 3000 if not specified
+export PORT="${PORT:-3000}"
+
+# Start processes via procman
+exec procman Procfile.dev "$@"
+```
 
 ## Usage
 
