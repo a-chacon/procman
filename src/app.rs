@@ -41,6 +41,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub input_buffer: String,
     pub show_help: bool,
+    pub wrap: bool,
 }
 
 const COLORS: &[Color] = &[
@@ -76,6 +77,7 @@ impl App {
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             show_help: false,
+            wrap: true,
         }
     }
 
@@ -148,6 +150,12 @@ impl App {
             }
             KeyCode::Char('i') => {
                 self.input_mode = InputMode::Interactive;
+            }
+            KeyCode::Char('w') => {
+                self.wrap = !self.wrap;
+                for p in &mut self.processes {
+                    p.scroll = 0;
+                }
             }
             KeyCode::Char('a') => {
                 self.input_mode = InputMode::Insert(InsertField::Search);

@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 futures = "0.3.31"
-ratatui = "0.30.0"
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
 tokio = { version = "1.40.0", features = ["full"] }
 color-eyre = "0.6.3"
 anyhow = "1.0.95"

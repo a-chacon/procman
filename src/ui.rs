@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Clear, Paragraph, Tabs, Widget},
+    widgets::{Block, BorderType, Clear, Paragraph, Tabs, Widget, Wrap},
 };
 
 use crate::app::App;
@@ -114,6 +114,7 @@ impl Widget for &App {
                 Line::from("  i              : [i]nteractive Mode"),
                 Line::from("  a              : Se[a]rch logs (highlights)"),
                 Line::from("  r              : Filte[r] logs (hides lines)"),
+                Line::from("  w              : Toggle line [w]rap"),
                 Line::from("  Delete         : Clear Search/Filter"),
                 Line::from(""),
                 Line::from(vec![Span::styled(
@@ -341,18 +342,40 @@ impl App {
             }
 
             let height = inner_area.height as usize;
-            let max_scroll = log_text.lines.len().saturating_sub(height) as u16;
 
-            // If scroll is 0, we auto-scroll to the bottom.
-            let current_scroll = if process.scroll == 0 {
-                max_scroll
+            if self.wrap {
+                // Only wrap the tail that can fill the viewport: each logical line wraps to
+                // >=1 row, so the last `height + scroll` lines always cover the window. Feeding
+                // the whole buffer would re-wrap up to 1000 lines every frame (30 FPS).
+                let scroll = process.scroll as usize;
+                let n = log_text.lines.len();
+                let start = n.saturating_sub(height + scroll + 1);
+                let tail = Text::from(log_text.lines[start..].to_vec());
+
+                let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
+                let total_rows = paragraph.line_count(inner_area.width);
+                let current_scroll = total_rows
+                    .saturating_sub(height)
+                    .saturating_sub(scroll)
+                    .min(u16::MAX as usize) as u16;
+
+                paragraph
+                    .scroll((current_scroll, 0))
+                    .render(inner_area, buf);
             } else {
-                max_scroll.saturating_sub(process.scroll)
-            };
+                let max_scroll = log_text.lines.len().saturating_sub(height) as u16;
 
-            Paragraph::new(log_text)
-                .scroll((current_scroll, 0))
-                .render(inner_area, buf);
+                // If scroll is 0, we auto-scroll to the bottom.
+                let current_scroll = if process.scroll == 0 {
+                    max_scroll
+                } else {
+                    max_scroll.saturating_sub(process.scroll)
+                };
+
+                Paragraph::new(log_text)
+                    .scroll((current_scroll, 0))
+                    .render(inner_area, buf);
+            }
         }
     }
 }
