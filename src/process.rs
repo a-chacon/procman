@@ -141,10 +141,10 @@ impl Process {
                         esc_buffer.push(c);
                         // Basic support for "Clear Line" sequences
                         if c == 'K' {
-                            if esc_buffer.contains("[K") || esc_buffer.contains("[2K") {
-                                if let Some(line) = lines.back_mut() {
-                                    line.clear();
-                                }
+                            if (esc_buffer.contains("[K") || esc_buffer.contains("[2K"))
+                                && let Some(line) = lines.back_mut()
+                            {
+                                line.clear();
                             }
                             in_esc = false;
                             esc_buffer.clear();

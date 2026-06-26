@@ -62,7 +62,7 @@ impl Widget for &App {
         } else {
             let num_processes = self.processes.len();
             let num_cols = 2;
-            let num_rows = (num_processes + num_cols - 1) / num_cols;
+            let num_rows = num_processes.div_ceil(num_cols);
 
             let vertical_constraints = vec![Constraint::Ratio(1, num_rows as u32); num_rows];
             let rows = Layout::default()
@@ -279,10 +279,11 @@ impl App {
             let (cursor_row, cursor_col) = screen.cursor_position();
             let cursor_x = inner_area.x + cursor_col;
             let cursor_y = inner_area.y + cursor_row;
-            if cursor_x < area.right() && cursor_y < area.bottom() {
-                if let Some(cell) = buf.cell_mut((cursor_x, cursor_y)) {
-                    cell.set_style(Style::default().bg(Color::White).fg(Color::Black));
-                }
+            if cursor_x < area.right()
+                && cursor_y < area.bottom()
+                && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
+            {
+                cell.set_style(Style::default().bg(Color::White).fg(Color::Black));
             }
         } else {
             let lines = process.output.lock().unwrap();
@@ -290,10 +291,10 @@ impl App {
             for (i, line) in lines.iter().enumerate() {
                 let line_str = line.as_str();
 
-                if let Some(filter) = &process.filter {
-                    if !line_str.to_lowercase().contains(&filter.to_lowercase()) {
-                        continue;
-                    }
+                if let Some(filter) = &process.filter
+                    && !line_str.to_lowercase().contains(&filter.to_lowercase())
+                {
+                    continue;
                 }
 
                 // Highlighting Search Query

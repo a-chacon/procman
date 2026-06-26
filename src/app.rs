@@ -251,7 +251,7 @@ impl App {
                     self.fullscreen_index = Some(self.selected_index);
                 }
             }
-            KeyCode::Char(c) if c.is_digit(10) => {
+            KeyCode::Char(c) if c.is_ascii_digit() => {
                 let digit = c.to_digit(10).unwrap() as usize;
                 if digit > 0 && digit <= self.processes.len() {
                     self.selected_index = digit - 1;
@@ -432,7 +432,7 @@ impl App {
             return;
         }
         let num_cols = 2;
-        let num_rows = (num_processes + num_cols - 1) / num_cols;
+        let num_rows = num_processes.div_ceil(num_cols);
 
         let cell_height = size.height / num_rows as u16;
         let cell_width = size.width / num_cols as u16;
