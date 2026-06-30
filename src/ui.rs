@@ -197,7 +197,7 @@ impl App {
             let interactive_label = if is_interactive {
                 vec![
                     Span::raw(" exit "),
-                    Span::styled("Ctrl-A", Style::default().fg(process.color).bold()),
+                    Span::styled("Ctrl-A ", Style::default().fg(process.color).bold()),
                 ]
             } else {
                 vec![

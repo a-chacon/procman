@@ -130,8 +130,6 @@ impl App {
                         p.scroll = 0;
                     }
                     self.fullscreen_index = None;
-                } else {
-                    self.events.send(AppEvent::Quit);
                 }
             }
             KeyCode::Delete => {
