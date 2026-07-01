@@ -18,7 +18,9 @@ use anyhow::Result;
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
+use ratatui::layout::Size;
 use ratatui::style::Color;
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
@@ -26,14 +28,22 @@ pub enum InputMode {
     Interactive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownStatus {
+    Pending,
+    Stopping,
+    Done,
+}
+
 pub struct App {
     pub running: bool,
     pub events: EventHandler,
     pub processes: Vec<Process>,
     pub selected_index: usize,
-    pub fullscreen_index: Option<usize>,
     pub input_mode: InputMode,
     pub show_help: bool,
+    pub last_terminal_size: Option<Size>,
+    pub shutdown_states: Option<Vec<ShutdownStatus>>,
 }
 
 const COLORS: &[Color] = &[
@@ -65,19 +75,25 @@ impl App {
             events: EventHandler::new(),
             processes,
             selected_index: 0,
-            fullscreen_index: None,
             input_mode: InputMode::Normal,
             show_help: false,
+            last_terminal_size: None,
+            shutdown_states: None,
         }
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        let initial_area = terminal.size()?;
+        self.last_terminal_size = Some(initial_area);
+        let (rows, cols) = Self::pty_dimensions(initial_area);
+
         for process in &mut self.processes {
-            process.spawn().await?;
+            process.spawn_with_size(rows, cols).await?;
         }
 
         while self.running {
             let area = terminal.size()?;
+            self.last_terminal_size = Some(area);
             self.resize_processes(area);
 
             terminal.draw(|frame| frame.render_widget(&self, frame.area()))?;
@@ -92,7 +108,7 @@ impl App {
                     _ => {}
                 },
                 Event::App(app_event) => match app_event {
-                    AppEvent::Quit => self.quit().await?,
+                    AppEvent::Quit => self.shutdown_with_modal(&mut terminal).await?,
                 },
             }
         }
@@ -113,11 +129,6 @@ impl App {
         }
 
         match key_event.code {
-            KeyCode::Esc => {
-                if self.fullscreen_index.is_some() {
-                    self.fullscreen_index = None;
-                }
-            }
             KeyCode::Char('q') => self.events.send(AppEvent::Quit),
             KeyCode::Char('c' | 'C') if key_event.modifiers == KeyModifiers::CONTROL => {
                 self.events.send(AppEvent::Quit)
@@ -127,13 +138,6 @@ impl App {
             }
             KeyCode::Char('i') => {
                 self.input_mode = InputMode::Interactive;
-            }
-            KeyCode::Char('f') => {
-                if self.fullscreen_index.is_some() {
-                    self.fullscreen_index = None;
-                } else {
-                    self.fullscreen_index = Some(self.selected_index);
-                }
             }
             KeyCode::PageUp => {
                 if let Some(p) = self.processes.get_mut(self.selected_index) {
@@ -172,46 +176,20 @@ impl App {
                 let idx = self.selected_index;
                 self.execute_command_on_idx(idx, "restart").await?;
             }
-            KeyCode::Enter => {
-                if self.fullscreen_index.is_some() {
-                    self.fullscreen_index = None;
-                } else {
-                    self.fullscreen_index = Some(self.selected_index);
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected_index >= 2 {
-                    self.selected_index -= 2;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected_index + 2 < self.processes.len() {
-                    self.selected_index += 2;
-                }
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') => {
                 if self.selected_index > 0 {
                     self.selected_index -= 1;
                 }
-                if self.fullscreen_index.is_some() {
-                    self.fullscreen_index = Some(self.selected_index);
-                }
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') => {
                 if self.selected_index + 1 < self.processes.len() {
                     self.selected_index += 1;
-                }
-                if self.fullscreen_index.is_some() {
-                    self.fullscreen_index = Some(self.selected_index);
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 let digit = c.to_digit(10).unwrap() as usize;
                 if digit > 0 && digit <= self.processes.len() {
                     self.selected_index = digit - 1;
-                    if self.fullscreen_index.is_some() {
-                        self.fullscreen_index = Some(self.selected_index);
-                    }
                 }
             }
             _ => {}
@@ -295,11 +273,13 @@ impl App {
     }
 
     async fn execute_command_on_idx(&mut self, idx: usize, command: &str) -> Result<()> {
+        let (rows, cols) = self.current_pty_dimensions();
+
         if let Some(p) = self.processes.get_mut(idx) {
             match command {
                 "start" => {
                     if p.status != crate::process::ProcessStatus::Running {
-                        p.spawn().await?;
+                        p.spawn_with_size(rows, cols).await?;
                     }
                 }
                 "stop" => {
@@ -307,7 +287,7 @@ impl App {
                 }
                 "restart" => {
                     p.kill().await?;
-                    p.spawn().await?;
+                    p.spawn_with_size(rows, cols).await?;
                 }
                 _ => {}
             }
@@ -316,34 +296,66 @@ impl App {
     }
 
     fn resize_processes(&mut self, size: ratatui::layout::Size) {
-        if let Some(idx) = self.fullscreen_index {
-            if let Some(p) = self.processes.get_mut(idx) {
-                let _ = p.resize_pty(size.height.saturating_sub(5), size.width.saturating_sub(2));
-            }
+        if self.processes.is_empty() {
             return;
         }
 
-        let num_processes = self.processes.len();
-        if num_processes == 0 {
-            return;
+        let (rows, cols) = Self::pty_dimensions(size);
+        if let Some(p) = self.processes.get_mut(self.selected_index) {
+            let _ = p.resize_pty(rows, cols);
         }
-        let num_cols = 2;
-        let num_rows = num_processes.div_ceil(num_cols);
+    }
 
-        let cell_height = size.height / num_rows as u16;
-        let cell_width = size.width / num_cols as u16;
-
-        for p in &mut self.processes {
-            let _ = p.resize_pty(cell_height.saturating_sub(2), cell_width.saturating_sub(2));
+    fn current_pty_dimensions(&self) -> (u16, u16) {
+        match self.last_terminal_size {
+            Some(size) => Self::pty_dimensions(size),
+            None => (24, 80),
         }
+    }
+
+    fn pty_dimensions(size: Size) -> (u16, u16) {
+        (
+            size.height.saturating_sub(5).max(1),
+            size.width.saturating_sub(2).max(1),
+        )
     }
 
     pub fn tick(&self) {}
 
+    async fn shutdown_with_modal(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let total = self.processes.len();
+        self.shutdown_states = Some(vec![ShutdownStatus::Pending; total]);
+
+        for idx in 0..total {
+            if let Some(states) = &mut self.shutdown_states {
+                states[idx] = ShutdownStatus::Stopping;
+            }
+            terminal.draw(|frame| frame.render_widget(&*self, frame.area()))?;
+            sleep(Duration::from_millis(120)).await;
+
+            if let Some(process) = self.processes.get_mut(idx) {
+                let _ = process.kill().await;
+            }
+
+            if let Some(states) = &mut self.shutdown_states {
+                states[idx] = ShutdownStatus::Done;
+            }
+            terminal.draw(|frame| frame.render_widget(&*self, frame.area()))?;
+            sleep(Duration::from_millis(120)).await;
+        }
+
+        self.shutdown_states = None;
+        self.running = false;
+        Ok(())
+    }
+
     pub async fn quit(&mut self) -> Result<()> {
         for process in &mut self.processes {
             process.kill().await?;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
         self.running = false;
         Ok(())
     }

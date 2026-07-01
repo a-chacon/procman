@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::style::Color;
 use std::io::{Read, Write};
 use std::sync::{
@@ -30,6 +30,7 @@ pub struct Process {
     pub parser: Arc<RwLock<Parser>>,
     pub sender: Option<Sender<Bytes>>,
     pub master_pty: Option<Box<dyn MasterPty + Send>>,
+    pub child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     pub status: ProcessStatus,
     pub exited: Arc<AtomicBool>,
     pub scrollback: usize,
@@ -52,6 +53,7 @@ impl Process {
             parser: Arc::new(RwLock::new(Parser::new(24, 80, Self::SCROLLBACK_CAPACITY))),
             sender: None,
             master_pty: None,
+            child_killer: None,
             status: ProcessStatus::Stopped,
             exited: Arc::new(AtomicBool::new(false)),
             scrollback: 0,
@@ -59,11 +61,18 @@ impl Process {
     }
 
     pub async fn spawn(&mut self) -> Result<()> {
+        self.spawn_with_size(24, 80).await
+    }
+
+    pub async fn spawn_with_size(&mut self, rows: u16, cols: u16) -> Result<()> {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
-                rows: 24,
-                cols: 80,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -91,23 +100,34 @@ impl Process {
         self.exited.store(false, Ordering::Relaxed);
         self.scrollback = 0;
 
-        // Spawn child process and monitor it in blocking task
+        {
+            let mut parser = self.parser.write().unwrap();
+            parser.screen_mut().set_size(rows, cols);
+            parser.screen_mut().set_scrollback(0);
+        }
+
+        // Spawn child process and keep a killer handle for graceful shutdown.
+        let mut child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("Failed to spawn command")?;
+        self.child_killer = Some(child.clone_killer());
+
         let exited_clone = self.exited.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut child = pair.slave.spawn_command(cmd).unwrap();
+        std::thread::spawn(move || {
             let _ = child.wait();
             exited_clone.store(true, Ordering::Relaxed);
             drop(pair.slave);
         });
 
-        // Setup PTY reader
+        // Setup PTY reader on a dedicated thread (blocking IO).
         let mut reader = pair
             .master
             .try_clone_reader()
             .context("Failed to clone PTY reader")?;
 
         let parser = self.parser.clone();
-        tokio::spawn(async move {
+        std::thread::spawn(move || {
             let mut processed_buf = Vec::new();
             let mut buf = [0u8; 8192];
 
@@ -125,15 +145,15 @@ impl Process {
             }
         });
 
-        // Setup PTY writer with channel
+        // Setup PTY writer on a dedicated thread (blocking IO).
         let (tx, mut rx) = channel::<Bytes>(32);
         let mut writer = pair
             .master
             .take_writer()
             .context("Failed to take PTY writer")?;
 
-        tokio::spawn(async move {
-            while let Some(bytes) = rx.recv().await {
+        std::thread::spawn(move || {
+            while let Some(bytes) = rx.blocking_recv() {
                 let _ = writer.write_all(&bytes);
                 let _ = writer.flush();
             }
@@ -147,8 +167,13 @@ impl Process {
 
     pub async fn kill(&mut self) -> Result<()> {
         // Close the master PTY which will cause the child to exit
+        if let Some(killer) = &mut self.child_killer {
+            let _ = killer.kill();
+        }
+
         self.master_pty = None;
         self.sender = None;
+        self.child_killer = None;
         self.status = ProcessStatus::Stopped;
         self.exited.store(true, Ordering::Relaxed);
         self.scrollback = 0;
