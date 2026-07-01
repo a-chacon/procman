@@ -12,52 +12,49 @@
 //! along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, PtyPair, PtySize, native_pty_system};
+use bytes::Bytes;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::style::Color;
-use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicBool, Ordering},
+};
+use tokio::sync::mpsc::{Sender, channel};
 use vt100::Parser;
 
 pub struct Process {
     pub name: String,
     pub command: String,
     pub color: Color,
-    pub output: Arc<Mutex<VecDeque<String>>>,
-    pub vt: Arc<Mutex<Parser>>,
-    pub pty: Option<PtyPair>,
-    pub writer: Option<Box<dyn Write + Send>>,
-    pub child: Option<Box<dyn Child + Send + Sync>>,
+    pub parser: Arc<RwLock<Parser>>,
+    pub sender: Option<Sender<Bytes>>,
+    pub master_pty: Option<Box<dyn MasterPty + Send>>,
     pub status: ProcessStatus,
-    pub scroll: u16,
-    pub filter: Option<String>,
-    pub search_query: Option<String>,
-    pub active_match_line: Option<usize>,
+    pub exited: Arc<AtomicBool>,
+    pub scrollback: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStatus {
     Running,
     Stopped,
-    Failed,
 }
 
 impl Process {
+    const SCROLLBACK_CAPACITY: usize = 2000;
+
     pub fn new(name: String, command: String, color: Color) -> Self {
         Self {
             name,
             command,
             color,
-            output: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
-            vt: Arc::new(Mutex::new(Parser::new(24, 80, 1000))),
-            pty: None,
-            writer: None,
-            child: None,
+            parser: Arc::new(RwLock::new(Parser::new(24, 80, Self::SCROLLBACK_CAPACITY))),
+            sender: None,
+            master_pty: None,
             status: ProcessStatus::Stopped,
-            scroll: 0,
-            filter: None,
-            search_query: None,
-            active_match_line: None,
+            exited: Arc::new(AtomicBool::new(false)),
+            scrollback: 0,
         }
     }
 
@@ -90,157 +87,91 @@ impl Process {
             cmd.cwd(cwd);
         }
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .context(format!("Failed to spawn process {}", self.name))?;
-
-        self.child = Some(child);
         self.status = ProcessStatus::Running;
+        self.exited.store(false, Ordering::Relaxed);
+        self.scrollback = 0;
 
+        // Spawn child process and monitor it in blocking task
+        let exited_clone = self.exited.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            let _ = child.wait();
+            exited_clone.store(true, Ordering::Relaxed);
+            drop(pair.slave);
+        });
+
+        // Setup PTY reader
         let mut reader = pair
             .master
             .try_clone_reader()
             .context("Failed to clone PTY reader")?;
-        let writer = pair
+
+        let parser = self.parser.clone();
+        tokio::spawn(async move {
+            let mut processed_buf = Vec::new();
+            let mut buf = [0u8; 8192];
+
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(size) => {
+                        processed_buf.extend_from_slice(&buf[..size]);
+                        let mut parser = parser.write().unwrap();
+                        parser.process(&processed_buf);
+                        processed_buf.clear();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Setup PTY writer with channel
+        let (tx, mut rx) = channel::<Bytes>(32);
+        let mut writer = pair
             .master
             .take_writer()
             .context("Failed to take PTY writer")?;
 
-        self.writer = Some(writer);
-        self.pty = Some(pair);
-
-        let output_clone = self.output.clone();
-        let vt_clone = self.vt.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut buffer = [0u8; 4096];
-            let mut last_char_was_cr = false;
-            let mut in_esc = false;
-            let mut esc_buffer = String::new();
-
-            while let Ok(n) = reader.read(&mut buffer) {
-                if n == 0 {
-                    break;
-                }
-                let data = &buffer[..n];
-
-                // Feed to VT100 parser
-                {
-                    let mut vt = vt_clone.lock().unwrap();
-                    vt.process(data);
-                }
-
-                let s = String::from_utf8_lossy(data);
-                let mut lines = output_clone.lock().unwrap();
-                if lines.is_empty() {
-                    lines.push_back(String::new());
-                }
-
-                for c in s.chars() {
-                    if in_esc {
-                        esc_buffer.push(c);
-                        // Basic support for "Clear Line" sequences
-                        if c == 'K' {
-                            if (esc_buffer.contains("[K") || esc_buffer.contains("[2K"))
-                                && let Some(line) = lines.back_mut()
-                            {
-                                line.clear();
-                            }
-                            in_esc = false;
-                            esc_buffer.clear();
-                        } else if c.is_alphabetic() || esc_buffer.len() > 10 {
-                            // End of escape sequence or too long
-                            in_esc = false;
-                            esc_buffer.clear();
-                        }
-                        continue;
-                    }
-
-                    match c {
-                        '\x1b' => {
-                            in_esc = true;
-                            esc_buffer.clear();
-                            esc_buffer.push(c);
-                        }
-                        '\n' => {
-                            lines.push_back(String::new());
-                            if lines.len() > 1000 {
-                                lines.pop_front();
-                            }
-                            last_char_was_cr = false;
-                        }
-                        '\r' => {
-                            last_char_was_cr = true;
-                        }
-                        '\x08' => {
-                            if let Some(line) = lines.back_mut() {
-                                line.pop();
-                            }
-                            last_char_was_cr = false;
-                        }
-                        c => {
-                            if let Some(line) = lines.back_mut() {
-                                if last_char_was_cr {
-                                    line.clear();
-                                }
-                                line.push(c);
-                            }
-                            last_char_was_cr = false;
-                        }
-                    }
-                }
+        tokio::spawn(async move {
+            while let Some(bytes) = rx.recv().await {
+                let _ = writer.write_all(&bytes);
+                let _ = writer.flush();
             }
         });
+
+        self.sender = Some(tx);
+        self.master_pty = Some(pair.master);
 
         Ok(())
     }
 
     pub async fn kill(&mut self) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
-            if let Some(pid) = child.process_id() {
-                #[cfg(unix)]
-                {
-                    // Send SIGTERM to the process group.
-                    // Note: portable-pty doesn't automatically create a new group
-                    // unless we use setsid/setpgid, which we'll add to spawn.
-                    let _ = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(-(pid as i32)),
-                        nix::sys::signal::Signal::SIGTERM,
-                    );
-                }
+        // Close the master PTY which will cause the child to exit
+        self.master_pty = None;
+        self.sender = None;
+        self.status = ProcessStatus::Stopped;
+        self.exited.store(true, Ordering::Relaxed);
+        self.scrollback = 0;
 
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new("taskkill")
-                        .arg("/F")
-                        .arg("/T")
-                        .arg("/PID")
-                        .arg(pid.to_string())
-                        .output();
-                }
-            }
+        // Give it a moment to clean up
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-            let _ = child.kill();
-            // We must wait to avoid zombies and ensure cleanup
-            let _ = child.wait();
-            self.status = ProcessStatus::Stopped;
-        }
-        self.pty = None;
-        self.writer = None;
         Ok(())
     }
 
-    pub fn write_input(&mut self, input: &[u8]) -> Result<()> {
-        if let Some(writer) = &mut self.writer {
-            writer.write_all(input).context("Failed to write to PTY")?;
-            writer.flush().context("Failed to flush PTY writer")?;
+    pub async fn write_input(&mut self, input: Bytes) -> Result<()> {
+        if let Some(sender) = &self.sender {
+            sender
+                .send(input)
+                .await
+                .context("Failed to send input to PTY")?;
         }
         Ok(())
     }
 
     pub fn resize_pty(&mut self, rows: u16, cols: u16) -> Result<()> {
-        if let Some(pair) = &self.pty {
-            pair.master
+        if let Some(master) = &self.master_pty {
+            master
                 .resize(PtySize {
                     rows,
                     cols,
@@ -249,9 +180,34 @@ impl Process {
                 })
                 .context("Failed to resize PTY")?;
 
-            let mut vt = self.vt.lock().unwrap();
-            vt.set_size(rows, cols);
+            let mut parser = self.parser.write().unwrap();
+            parser.screen_mut().set_size(rows, cols);
+            parser.screen_mut().set_scrollback(self.scrollback);
         }
         Ok(())
+    }
+
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scrollback = self.scrollback.saturating_add(lines);
+        let mut parser = self.parser.write().unwrap();
+        parser.screen_mut().set_scrollback(self.scrollback);
+        self.scrollback = parser.screen().scrollback();
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scrollback = self.scrollback.saturating_sub(lines);
+        let mut parser = self.parser.write().unwrap();
+        parser.screen_mut().set_scrollback(self.scrollback);
+        self.scrollback = parser.screen().scrollback();
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scrollback = 0;
+        let mut parser = self.parser.write().unwrap();
+        parser.screen_mut().set_scrollback(0);
+    }
+
+    pub fn is_alive(&self) -> bool {
+        !self.exited.load(Ordering::Relaxed)
     }
 }

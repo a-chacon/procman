@@ -15,20 +15,14 @@ use crate::event::{AppEvent, Event, EventHandler};
 use crate::process::Process;
 use crate::procfile;
 use anyhow::Result;
+use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
 use ratatui::style::Color;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertField {
-    Search,
-    Filter,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Insert(InsertField),
     Interactive,
 }
 
@@ -39,9 +33,7 @@ pub struct App {
     pub selected_index: usize,
     pub fullscreen_index: Option<usize>,
     pub input_mode: InputMode,
-    pub input_buffer: String,
     pub show_help: bool,
-    pub wrap: bool,
 }
 
 const COLORS: &[Color] = &[
@@ -75,9 +67,7 @@ impl App {
             selected_index: 0,
             fullscreen_index: None,
             input_mode: InputMode::Normal,
-            input_buffer: String::new(),
             show_help: false,
-            wrap: true,
         }
     }
 
@@ -112,8 +102,7 @@ impl App {
     pub async fn handle_key_events(&mut self, key_event: KeyEvent) -> Result<()> {
         match self.input_mode {
             InputMode::Normal => self.handle_normal_mode(key_event).await,
-            InputMode::Insert(_) => self.handle_insert_mode(key_event).await,
-            InputMode::Interactive => self.handle_interactive_mode(key_event),
+            InputMode::Interactive => self.handle_interactive_mode(key_event).await,
         }
     }
 
@@ -126,17 +115,7 @@ impl App {
         match key_event.code {
             KeyCode::Esc => {
                 if self.fullscreen_index.is_some() {
-                    if let Some(p) = self.processes.get_mut(self.selected_index) {
-                        p.scroll = 0;
-                    }
                     self.fullscreen_index = None;
-                }
-            }
-            KeyCode::Delete => {
-                if let Some(p) = self.processes.get_mut(self.selected_index) {
-                    p.filter = None;
-                    p.search_query = None;
-                    p.active_match_line = None;
                 }
             }
             KeyCode::Char('q') => self.events.send(AppEvent::Quit),
@@ -149,48 +128,36 @@ impl App {
             KeyCode::Char('i') => {
                 self.input_mode = InputMode::Interactive;
             }
-            KeyCode::Char('w') => {
-                self.wrap = !self.wrap;
-                for p in &mut self.processes {
-                    p.scroll = 0;
-                }
-            }
-            KeyCode::Char('a') => {
-                self.input_mode = InputMode::Insert(InsertField::Search);
-                self.input_buffer.clear();
-            }
-            KeyCode::Char('r') => {
-                self.input_mode = InputMode::Insert(InsertField::Filter);
-                self.input_buffer.clear();
-            }
-            KeyCode::Char('g') => {
-                if self.fullscreen_index.is_some()
-                    && let Some(p) = self.processes.get_mut(self.selected_index)
-                {
-                    p.scroll = 1000;
-                }
-            }
-            KeyCode::Char('G') => {
-                if self.fullscreen_index.is_some()
-                    && let Some(p) = self.processes.get_mut(self.selected_index)
-                {
-                    p.scroll = 0;
-                }
-            }
-            KeyCode::Char('n') => {
-                self.search_next(false);
-            }
-            KeyCode::Char('N') => {
-                self.search_next(true);
-            }
             KeyCode::Char('f') => {
                 if self.fullscreen_index.is_some() {
-                    if let Some(p) = self.processes.get_mut(self.selected_index) {
-                        p.scroll = 0;
-                    }
                     self.fullscreen_index = None;
                 } else {
                     self.fullscreen_index = Some(self.selected_index);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(p) = self.processes.get_mut(self.selected_index) {
+                    p.scroll_up(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(p) = self.processes.get_mut(self.selected_index) {
+                    p.scroll_down(10);
+                }
+            }
+            KeyCode::Char('u') => {
+                if let Some(p) = self.processes.get_mut(self.selected_index) {
+                    p.scroll_up(10);
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(p) = self.processes.get_mut(self.selected_index) {
+                    p.scroll_down(10);
+                }
+            }
+            KeyCode::End => {
+                if let Some(p) = self.processes.get_mut(self.selected_index) {
+                    p.scroll_to_bottom();
                 }
             }
             KeyCode::Char('s') => {
@@ -201,35 +168,24 @@ impl App {
                 let idx = self.selected_index;
                 self.execute_command_on_idx(idx, "start").await?;
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('r') => {
                 let idx = self.selected_index;
                 self.execute_command_on_idx(idx, "restart").await?;
             }
             KeyCode::Enter => {
                 if self.fullscreen_index.is_some() {
-                    if let Some(p) = self.processes.get_mut(self.selected_index) {
-                        p.scroll = 0;
-                    }
                     self.fullscreen_index = None;
                 } else {
                     self.fullscreen_index = Some(self.selected_index);
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.fullscreen_index.is_some() {
-                    if let Some(p) = self.processes.get_mut(self.selected_index) {
-                        p.scroll = p.scroll.saturating_add(1);
-                    }
-                } else if self.selected_index >= 2 {
+                if self.selected_index >= 2 {
                     self.selected_index -= 2;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.fullscreen_index.is_some() {
-                    if let Some(p) = self.processes.get_mut(self.selected_index) {
-                        p.scroll = p.scroll.saturating_sub(1);
-                    }
-                } else if self.selected_index + 2 < self.processes.len() {
+                if self.selected_index + 2 < self.processes.len() {
                     self.selected_index += 2;
                 }
             }
@@ -263,35 +219,7 @@ impl App {
         Ok(())
     }
 
-    async fn handle_insert_mode(&mut self, key_event: KeyEvent) -> Result<()> {
-        match key_event.code {
-            KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                self.input_buffer.clear();
-            }
-            KeyCode::Enter => {
-                let input = self.input_buffer.clone();
-                let mode = self.input_mode.clone();
-                match mode {
-                    InputMode::Insert(InsertField::Search) => self.apply_search(&input),
-                    InputMode::Insert(InsertField::Filter) => self.apply_filter(&input),
-                    _ => {}
-                }
-                self.input_mode = InputMode::Normal;
-                self.input_buffer.clear();
-            }
-            KeyCode::Char(c) => {
-                self.input_buffer.push(c);
-            }
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn handle_interactive_mode(&mut self, key_event: KeyEvent) -> Result<()> {
+    async fn handle_interactive_mode(&mut self, key_event: KeyEvent) -> Result<()> {
         if key_event.code == KeyCode::Char('a')
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
         {
@@ -300,74 +228,68 @@ impl App {
         }
 
         if let Some(p) = self.processes.get_mut(self.selected_index) {
-            let input = match key_event.code {
-                KeyCode::Char(c) => {
-                    if key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                        match c {
-                            'a' => vec![1],
-                            'b' => vec![2],
-                            'c' => vec![3],
-                            'd' => vec![4],
-                            'e' => vec![5],
-                            'f' => vec![6],
-                            'g' => vec![7],
-                            'h' => vec![8],
-                            'i' => vec![9],
-                            'j' => vec![10],
-                            'k' => vec![11],
-                            'l' => vec![12],
-                            'm' => vec![13],
-                            'n' => vec![14],
-                            'o' => vec![15],
-                            'p' => vec![16],
-                            'q' => vec![17],
-                            'r' => vec![18],
-                            's' => vec![19],
-                            't' => vec![20],
-                            'u' => vec![21],
-                            'v' => vec![22],
-                            'w' => vec![23],
-                            'x' => vec![24],
-                            'y' => vec![25],
-                            'z' => vec![26],
-                            _ => vec![],
-                        }
-                    } else if key_event.modifiers.contains(KeyModifiers::ALT) {
-                        vec![27, c as u8]
-                    } else {
-                        vec![c as u8]
+            if key_event.modifiers.contains(KeyModifiers::ALT) {
+                match key_event.code {
+                    KeyCode::PageUp => {
+                        p.scroll_up(10);
+                        return Ok(());
                     }
+                    KeyCode::PageDown => {
+                        p.scroll_down(10);
+                        return Ok(());
+                    }
+                    KeyCode::End => {
+                        p.scroll_to_bottom();
+                        return Ok(());
+                    }
+                    _ => {}
                 }
-                KeyCode::Enter => vec![b'\r'],
-                KeyCode::Backspace => vec![127],
-                KeyCode::Tab => vec![9],
-                KeyCode::Esc => vec![27],
+            }
+
+            let input_bytes = match key_event.code {
+                KeyCode::Char(ch) => {
+                    let mut send = vec![ch as u8];
+                    let upper = ch.to_ascii_uppercase();
+                    if key_event.modifiers == KeyModifiers::CONTROL {
+                        match upper {
+                            '2' | '@' | ' ' => send = vec![0],
+                            '3' | '[' => send = vec![27],
+                            '4' | '\\' => send = vec![28],
+                            '5' | ']' => send = vec![29],
+                            '6' | '^' => send = vec![30],
+                            '7' | '-' | '_' => send = vec![31],
+                            char if ('A'..='_').contains(&char) => {
+                                let ascii_val = char as u8;
+                                let ascii_to_send = ascii_val - 64;
+                                send = vec![ascii_to_send];
+                            }
+                            _ => {}
+                        }
+                    }
+                    send
+                }
+                #[cfg(unix)]
+                KeyCode::Enter => vec![b'\n'],
+                #[cfg(windows)]
+                KeyCode::Enter => vec![b'\r', b'\n'],
+                KeyCode::Backspace => vec![8],
+                KeyCode::Left => vec![27, 91, 68],
+                KeyCode::Right => vec![27, 91, 67],
                 KeyCode::Up => vec![27, 91, 65],
                 KeyCode::Down => vec![27, 91, 66],
-                KeyCode::Right => vec![27, 91, 67],
-                KeyCode::Left => vec![27, 91, 68],
-                KeyCode::Delete => vec![27, 91, 51, 126],
-                KeyCode::Home => vec![27, 72],
-                KeyCode::End => vec![27, 70],
+                KeyCode::Tab => vec![9],
+                KeyCode::Home => vec![27, 91, 72],
+                KeyCode::End => vec![27, 91, 70],
                 KeyCode::PageUp => vec![27, 91, 53, 126],
                 KeyCode::PageDown => vec![27, 91, 54, 126],
-                KeyCode::F(1) => vec![27, 79, 80],
-                KeyCode::F(2) => vec![27, 79, 81],
-                KeyCode::F(3) => vec![27, 79, 82],
-                KeyCode::F(4) => vec![27, 79, 83],
-                KeyCode::F(5) => vec![27, 91, 49, 53, 126],
-                KeyCode::F(6) => vec![27, 91, 49, 55, 126],
-                KeyCode::F(7) => vec![27, 91, 49, 56, 126],
-                KeyCode::F(8) => vec![27, 91, 49, 57, 126],
-                KeyCode::F(9) => vec![27, 91, 50, 48, 126],
-                KeyCode::F(10) => vec![27, 91, 50, 49, 126],
-                KeyCode::F(11) => vec![27, 91, 50, 51, 126],
-                KeyCode::F(12) => vec![27, 91, 50, 52, 126],
-                _ => vec![],
+                KeyCode::BackTab => vec![27, 91, 90],
+                KeyCode::Delete => vec![27, 91, 51, 126],
+                KeyCode::Insert => vec![27, 91, 50, 126],
+                KeyCode::Esc => vec![27],
+                _ => return Ok(()),
             };
-            if !input.is_empty() {
-                p.write_input(&input)?;
-            }
+
+            p.write_input(Bytes::from(input_bytes)).await?;
         }
         Ok(())
     }
@@ -382,7 +304,6 @@ impl App {
                 }
                 "stop" => {
                     p.kill().await?;
-                    p.status = crate::process::ProcessStatus::Stopped;
                 }
                 "restart" => {
                     p.kill().await?;
@@ -392,29 +313,6 @@ impl App {
             }
         }
         Ok(())
-    }
-
-    fn apply_search(&mut self, query: &str) {
-        if let Some(p) = self.processes.get_mut(self.selected_index) {
-            if query.trim().is_empty() {
-                p.search_query = None;
-                p.active_match_line = None;
-            } else {
-                p.search_query = Some(query.trim().to_string());
-                p.active_match_line = None;
-                self.search_next(false);
-            }
-        }
-    }
-
-    fn apply_filter(&mut self, filter: &str) {
-        if let Some(p) = self.processes.get_mut(self.selected_index) {
-            if filter.trim().is_empty() {
-                p.filter = None;
-            } else {
-                p.filter = Some(filter.trim().to_string());
-            }
-        }
     }
 
     fn resize_processes(&mut self, size: ratatui::layout::Size) {
@@ -437,78 +335,6 @@ impl App {
 
         for p in &mut self.processes {
             let _ = p.resize_pty(cell_height.saturating_sub(2), cell_width.saturating_sub(2));
-        }
-    }
-
-    fn search_next(&mut self, reverse: bool) {
-        let p = match self.processes.get_mut(self.selected_index) {
-            Some(p) => p,
-            None => return,
-        };
-
-        let query = match &p.search_query {
-            Some(q) => q.to_lowercase(),
-            None => return,
-        };
-
-        let lines = p.output.lock().unwrap();
-        if lines.is_empty() {
-            return;
-        }
-
-        let total_lines = lines.len();
-        let height = 20;
-
-        let current_idx = p.active_match_line.unwrap_or_else(|| {
-            if !reverse {
-                total_lines
-                    .saturating_sub(height)
-                    .saturating_sub(p.scroll as usize)
-            } else {
-                total_lines.saturating_sub(p.scroll as usize)
-            }
-        });
-
-        if !reverse {
-            let start = if p.active_match_line.is_some() {
-                current_idx + 1
-            } else {
-                current_idx
-            };
-            for i in start..total_lines {
-                if lines[i].to_lowercase().contains(&query) {
-                    p.active_match_line = Some(i);
-                    p.scroll = total_lines.saturating_sub(i).saturating_sub(height / 2) as u16;
-                    return;
-                }
-            }
-            for i in 0..start {
-                if lines[i].to_lowercase().contains(&query) {
-                    p.active_match_line = Some(i);
-                    p.scroll = total_lines.saturating_sub(i).saturating_sub(height / 2) as u16;
-                    return;
-                }
-            }
-        } else {
-            let start = if p.active_match_line.is_some() {
-                current_idx.saturating_sub(1)
-            } else {
-                current_idx
-            };
-            for i in (0..=start).rev() {
-                if lines[i].to_lowercase().contains(&query) {
-                    p.active_match_line = Some(i);
-                    p.scroll = total_lines.saturating_sub(i).saturating_sub(height / 2) as u16;
-                    return;
-                }
-            }
-            for i in (start + 1..total_lines).rev() {
-                if lines[i].to_lowercase().contains(&query) {
-                    p.active_match_line = Some(i);
-                    p.scroll = total_lines.saturating_sub(i).saturating_sub(height / 2) as u16;
-                    return;
-                }
-            }
         }
     }
 
