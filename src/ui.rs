@@ -31,60 +31,50 @@ impl Widget for &App {
             return;
         }
 
-        let body_area = area;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
 
-        if let Some(idx) = self.fullscreen_index {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(0)])
-                .split(body_area);
+        let titles: Vec<Line> = self
+            .processes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Line::from(process_title(p, i, self.selected_index == i)))
+            .collect();
 
-            let titles: Vec<Line> = self
-                .processes
-                .iter()
-                .enumerate()
-                .map(|(i, p)| Line::from(process_title(p, i, idx == i)))
-                .collect();
+        let process = self
+            .processes
+            .iter()
+            .enumerate()
+            .find(|(i, _p)| &self.selected_index == i)
+            .unwrap()
+            .1;
 
-            Tabs::new(titles)
-                .block(
-                    Block::bordered()
-                        .title(" Processes ")
-                        .border_type(BorderType::Rounded),
-                )
-                .select(idx)
-                .highlight_style(Style::default().fg(Color::White))
-                .render(chunks[0], buf);
+        let help_label = vec![
+            Span::raw(" hel"),
+            Span::styled("p", Style::default().fg(process.color).bold()),
+        ];
 
-            if let Some(process) = self.processes.get(idx) {
-                self.render_process(process, true, chunks[1], buf, idx);
-            }
-        } else {
-            let num_processes = self.processes.len();
-            let num_cols = 2;
-            let num_rows = num_processes.div_ceil(num_cols);
+        let quit_label = vec![
+            Span::styled("q", Style::default().fg(process.color).bold()),
+            Span::raw("uit"),
+        ];
 
-            let vertical_constraints = vec![Constraint::Ratio(1, num_rows as u32); num_rows];
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(vertical_constraints)
-                .split(body_area);
+        Tabs::new(titles)
+            .block(
+                Block::bordered()
+                    .title(" Processes ")
+                    .title(Line::from(help_label).right_aligned())
+                    .title(Line::from(quit_label).right_aligned())
+                    .border_type(BorderType::Rounded),
+            )
+            .select(self.selected_index)
+            .highlight_style(Style::default().fg(Color::White))
+            .render(chunks[0], buf);
 
-            for (i, row_area) in rows.iter().enumerate() {
-                let horizontal_constraints = vec![Constraint::Ratio(1, num_cols as u32); num_cols];
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints(horizontal_constraints)
-                    .split(*row_area);
-
-                for (j, col_area) in cols.iter().enumerate() {
-                    let process_idx = i * num_cols + j;
-                    if let Some(process) = self.processes.get(process_idx) {
-                        let is_selected = process_idx == self.selected_index;
-                        self.render_process(process, is_selected, *col_area, buf, process_idx);
-                    }
-                }
-            }
+        if let Some(process) = self.processes.get(self.selected_index) {
+            self.render_process(process, true, chunks[1], buf, self.selected_index);
         }
 
         if self.show_help {
@@ -99,9 +89,8 @@ impl Widget for &App {
                     "Navigation:",
                     Style::default().bold().underlined(),
                 )]),
-                Line::from("  Arrows / hjkl  : Select process"),
+                Line::from("  Arrows / hjkl  : Select process tab"),
                 Line::from("  1-9            : Quick jump to process"),
-                Line::from("  f / Enter      : Toggle fullscreen"),
                 Line::from("  PgUp/PgDn      : Scroll selected terminal"),
                 Line::from("  u / d          : Scroll selected terminal"),
                 Line::from("  End            : Jump to live output"),
@@ -112,7 +101,7 @@ impl Widget for &App {
                 )]),
                 Line::from("  t              : S[t]art process"),
                 Line::from("  s              : [s]top process"),
-                Line::from("  e              : R[e]start process"),
+                Line::from("  r              : [r]estart process"),
                 Line::from("  i              : [i]nteractive Mode"),
                 Line::from(""),
                 Line::from(vec![Span::styled(
@@ -138,6 +127,42 @@ impl Widget for &App {
                 .block(block)
                 .render(help_area, buf);
         }
+
+        if let Some(states) = &self.shutdown_states {
+            let modal_area = centered_rect(70, 50, area);
+            Clear.render(modal_area, buf);
+
+            let mut lines = vec![
+                Line::from(vec![Span::styled(
+                    "Shutting down processes...",
+                    Style::default().bold(),
+                )]),
+                Line::from(""),
+            ];
+
+            for (idx, process) in self.processes.iter().enumerate() {
+                let symbol = match states
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(crate::app::ShutdownStatus::Pending)
+                {
+                    crate::app::ShutdownStatus::Pending => "○",
+                    crate::app::ShutdownStatus::Stopping => "◐",
+                    crate::app::ShutdownStatus::Done => "●",
+                };
+
+                lines.push(Line::from(format!(" {} {}", symbol, process.name)));
+            }
+
+            Paragraph::new(lines)
+                .block(
+                    Block::bordered()
+                        .title(" Closing ")
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Yellow)),
+                )
+                .render(modal_area, buf);
+        }
     }
 }
 
@@ -161,16 +186,6 @@ impl App {
 
         if is_selected {
             block = block.border_style(Style::default().fg(process.color));
-
-            let help_label = vec![
-                Span::raw(" hel"),
-                Span::styled("p", Style::default().fg(process.color).bold()),
-            ];
-
-            let full_screen_label = vec![
-                Span::styled("f", Style::default().fg(process.color).bold()),
-                Span::raw("ullscreen "),
-            ];
 
             let restart_label = vec![
                 Span::styled(" r", Style::default().fg(process.color).bold()),
@@ -211,8 +226,6 @@ impl App {
             };
 
             block = block
-                .title(Line::from(help_label).right_aligned())
-                .title(Line::from(full_screen_label).right_aligned())
                 .title_bottom(Line::from(restart_label).right_aligned())
                 .title_bottom(Line::from(stop_label).right_aligned())
                 .title_bottom(Line::from(start_label).right_aligned())
