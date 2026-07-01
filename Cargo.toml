@@ -1,6 +1,6 @@
 [package]
 name = "proc-man"
-version = "0.0.1"
+version = "0.0.2"
 description = "Simple tool for Manage Procfile-based applications"
 authors = ["a-chacon <andres.ch@protonmail.com>"]
 license = "GPL-3.0"
