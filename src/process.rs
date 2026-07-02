@@ -30,10 +30,14 @@ pub struct Process {
     pub parser: Arc<RwLock<Parser>>,
     pub sender: Option<Sender<Bytes>>,
     pub master_pty: Option<Box<dyn MasterPty + Send>>,
+    pub process_id: Option<u32>,
     pub child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     pub status: ProcessStatus,
     pub exited: Arc<AtomicBool>,
     pub scrollback: usize,
+    pub mem: u64,
+    pub cpu: f32,
+    pub start_time: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,10 +57,14 @@ impl Process {
             parser: Arc::new(RwLock::new(Parser::new(24, 80, Self::SCROLLBACK_CAPACITY))),
             sender: None,
             master_pty: None,
+            process_id: None,
             child_killer: None,
             status: ProcessStatus::Stopped,
             exited: Arc::new(AtomicBool::new(false)),
             scrollback: 0,
+            mem: 0,
+            cpu: 0.0,
+            start_time: 0,
         }
     }
 
@@ -85,9 +93,11 @@ impl Process {
             c.env("TERM", "xterm-256color");
             c
         } else {
+            // Use `exec` so the shell process is replaced by the target command.
+            // This keeps the same PID, allowing direct per-PID stats lookups later.
             let mut c = CommandBuilder::new("sh");
             c.arg("-c");
-            c.arg(&self.command);
+            c.arg(format!("exec {}", self.command));
             c.env("TERM", "xterm-256color");
             c
         };
@@ -111,6 +121,7 @@ impl Process {
             .slave
             .spawn_command(cmd)
             .context("Failed to spawn command")?;
+        self.process_id = child.process_id();
         self.child_killer = Some(child.clone_killer());
 
         let exited_clone = self.exited.clone();
@@ -166,7 +177,6 @@ impl Process {
     }
 
     pub async fn kill(&mut self) -> Result<()> {
-        // Close the master PTY which will cause the child to exit
         if let Some(killer) = &mut self.child_killer {
             let _ = killer.kill();
         }

@@ -225,13 +225,43 @@ impl App {
                 ]
             };
 
+            let mem_label = vec![
+                Span::raw(" Memory: "),
+                Span::styled(
+                    process.mem.to_string(),
+                    Style::default().fg(process.color).bold(),
+                ),
+                Span::raw(" MB"),
+            ];
+
+            let cpu_label = vec![
+                Span::raw(" CPU: "),
+                Span::styled(
+                    process.cpu.to_string(),
+                    Style::default().fg(process.color).bold(),
+                ),
+                Span::raw(" %"),
+            ];
+
+            let pid_label = vec![
+                Span::raw(" PID: "),
+                Span::styled(
+                    process.process_id.unwrap_or(0).to_string(),
+                    Style::default().fg(process.color).bold(),
+                ),
+                Span::raw(" "),
+            ];
+
             block = block
                 .title_bottom(Line::from(restart_label).right_aligned())
                 .title_bottom(Line::from(stop_label).right_aligned())
                 .title_bottom(Line::from(start_label).right_aligned())
                 .title_bottom(Line::from(interactive_label).left_aligned())
                 .title_bottom(Line::from(up_label).left_aligned())
-                .title_bottom(Line::from(down_label).left_aligned());
+                .title_bottom(Line::from(down_label).left_aligned())
+                .title(Line::from(pid_label).right_aligned())
+                .title(Line::from(mem_label).right_aligned())
+                .title(Line::from(cpu_label).right_aligned());
         }
 
         let inner_area = block.inner(area);
@@ -274,7 +304,7 @@ fn process_title(process: &crate::process::Process, index: usize, selected: bool
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{} {}: {} ", status_str, process.name, process.command),
+            format!("{} {}: {}", status_str, process.name, process.command),
             Style::default().fg(color),
         ),
     ]

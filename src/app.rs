@@ -20,6 +20,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
 use ratatui::layout::Size;
 use ratatui::style::Color;
+use std::time::Instant;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,8 @@ pub struct App {
     pub show_help: bool,
     pub last_terminal_size: Option<Size>,
     pub shutdown_states: Option<Vec<ShutdownStatus>>,
+    pub system: System,
+    pub last_stats_refresh: Instant,
 }
 
 const COLORS: &[Color] = &[
@@ -79,6 +83,8 @@ impl App {
             show_help: false,
             last_terminal_size: None,
             shutdown_states: None,
+            system: System::new_all(),
+            last_stats_refresh: Instant::now(),
         }
     }
 
@@ -320,7 +326,40 @@ impl App {
         )
     }
 
-    pub fn tick(&self) {}
+    pub fn tick(&mut self) {
+        // Refresh system stats at a lower rate than render ticks to avoid UI stalls.
+        // Tick runs at 30 FPS, but process memory does not need frame-level updates.
+        if self.last_stats_refresh.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.last_stats_refresh = Instant::now();
+
+        let pids: Vec<Pid> = self
+            .processes
+            .iter()
+            .filter_map(|p| p.process_id.map(|pid| Pid::from(pid as usize)))
+            .collect();
+
+        if !pids.is_empty() {
+            self.system
+                .refresh_processes(ProcessesToUpdate::Some(&pids), true);
+        }
+
+        for process in &mut self.processes {
+            let sys_proc = process
+                .process_id
+                .and_then(|pid| self.system.process(Pid::from(pid as usize)));
+
+            if let Some(sys_proc) = sys_proc {
+                process.mem = sys_proc.memory() / 1024 / 1024;
+                process.cpu = sys_proc.cpu_usage() / self.system.cpus().len() as f32;
+            } else {
+                process.process_id = Some(0);
+                process.mem = 0;
+                process.cpu = 0.0;
+            }
+        }
+    }
 
     async fn shutdown_with_modal(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let total = self.processes.len();
