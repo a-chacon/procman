@@ -97,7 +97,7 @@ impl Process {
             // This keeps the same PID, allowing direct per-PID stats lookups later.
             let mut c = CommandBuilder::new("sh");
             c.arg("-c");
-            c.arg(format!("exec {}", self.command));
+            c.arg(self.command.clone());
             c.env("TERM", "xterm-256color");
             c
         };
