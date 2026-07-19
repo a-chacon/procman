@@ -1,0 +1,15 @@
+Source: {{ package_name }}
+Section: utils
+Priority: optional
+Maintainer: {{ maintainer }}
+Build-Depends: debhelper (>= 8.0.0), {{ build_dependencies | join: ', ' }}
+Standards-Version: 4.6.2
+Homepage: {{ homepage }}
+
+Package: {{ package_name }}
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, {{ runtime_dependencies | join: ', ' }}
+Description: {{ description }}
+ procman monitors, searches, and controls multiple Procfile-defined
+ processes in a single terminal dashboard, with live log streaming,
+ VT100 interactive mode, and per-process start/stop/restart.
