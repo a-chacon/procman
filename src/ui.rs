@@ -40,7 +40,7 @@ impl Widget for &App {
             .processes
             .iter()
             .enumerate()
-            .map(|(i, p)| Line::from(process_title(p, i, self.selected_index == i)))
+            .map(|(i, p)| Line::from(process_title(p, i, self.selected_index == i, false)))
             .collect();
 
         let process = self
@@ -180,7 +180,7 @@ impl App {
 
         let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .title(process_title(process, index, is_selected))
+            .title(process_title(process, index, is_selected, true))
             .border_style(Style::default().fg(Color::DarkGray))
             .title_style(Style::default().fg(Color::White));
 
@@ -281,7 +281,12 @@ impl App {
     }
 }
 
-fn process_title(process: &crate::process::Process, index: usize, selected: bool) -> Vec<Span<'_>> {
+fn process_title(
+    process: &crate::process::Process,
+    index: usize,
+    selected: bool,
+    long: bool,
+) -> Vec<Span<'_>> {
     let status_str = match process.status {
         crate::process::ProcessStatus::Running => "●",
         crate::process::ProcessStatus::Stopped => "○",
@@ -296,6 +301,12 @@ fn process_title(process: &crate::process::Process, index: usize, selected: bool
         Color::DarkGray
     };
 
+    let text = if long {
+        format!("{} {}: {} ", status_str, process.name, process.command)
+    } else {
+        format!("{} {} ", status_str, process.name)
+    };
+
     vec![
         Span::styled(
             idx_str,
@@ -303,10 +314,7 @@ fn process_title(process: &crate::process::Process, index: usize, selected: bool
                 .fg(process.color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("{} {}: {}", status_str, process.name, process.command),
-            Style::default().fg(color),
-        ),
+        Span::styled(text, Style::default().fg(color)),
     ]
 }
 
