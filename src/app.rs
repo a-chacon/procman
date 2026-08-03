@@ -182,6 +182,9 @@ impl App {
                 let idx = self.selected_index;
                 self.execute_command_on_idx(idx, "restart").await?;
             }
+            KeyCode::Char('R') => {
+                self.restart_all_processes().await?;
+            }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') => {
                 if self.selected_index > 0 {
                     self.selected_index -= 1;
@@ -385,6 +388,16 @@ impl App {
 
         self.shutdown_states = None;
         self.running = false;
+        Ok(())
+    }
+
+    async fn restart_all_processes(&mut self) -> Result<()> {
+        let total = self.processes.len();
+
+        for idx in 0..total {
+            self.execute_command_on_idx(idx, "restart").await?;
+        }
+
         Ok(())
     }
 

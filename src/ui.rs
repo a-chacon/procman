@@ -51,20 +51,26 @@ impl Widget for &App {
             .unwrap()
             .1;
 
+        let restart_all_label = vec![
+            Span::styled(" R", Style::default().fg(process.color).bold()),
+            Span::raw("estart all "),
+        ];
+
         let help_label = vec![
             Span::raw(" hel"),
-            Span::styled("p", Style::default().fg(process.color).bold()),
+            Span::styled("p ", Style::default().fg(process.color).bold()),
         ];
 
         let quit_label = vec![
-            Span::styled("q", Style::default().fg(process.color).bold()),
-            Span::raw("uit"),
+            Span::styled(" q", Style::default().fg(process.color).bold()),
+            Span::raw("uit "),
         ];
 
         Tabs::new(titles)
             .block(
                 Block::bordered()
                     .title(" Processes ")
+                    .title(Line::from(restart_all_label).right_aligned())
                     .title(Line::from(help_label).right_aligned())
                     .title(Line::from(quit_label).right_aligned())
                     .border_type(BorderType::Rounded),
