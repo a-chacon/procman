@@ -12,6 +12,7 @@
 //! along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::event::{AppEvent, Event, EventHandler};
+use crate::formation::Formation;
 use crate::process::Process;
 use crate::procfile;
 use anyhow::Result;
@@ -66,12 +67,34 @@ const COLORS: &[Color] = &[
 ];
 
 impl App {
-    pub fn new(procfile_path: String) -> Self {
+    pub fn new(procfile_path: String, formation: Option<Formation>) -> Self {
         let entries = procfile::parse(&procfile_path).unwrap_or_default();
+
+        // Expand each Procfile entry according to the formation:
+        //   count=0  → skip the process entirely
+        //   count=1  → single instance, keep the original name
+        //   count>1  → numbered instances: name.1, name.2, …
         let processes = entries
             .into_iter()
+            .flat_map(|e| {
+                let count = formation
+                    .as_ref()
+                    .map(|f| f.count_for(&e.name))
+                    .unwrap_or(1);
+
+                (1..=count)
+                    .map(|n| {
+                        let name = if count == 1 {
+                            e.name.clone()
+                        } else {
+                            format!("{}.{}", e.name, n)
+                        };
+                        (name, e.command.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
             .enumerate()
-            .map(|(i, e)| Process::new(e.name, e.command, COLORS[i % COLORS.len()]))
+            .map(|(i, (name, command))| Process::new(name, command, COLORS[i % COLORS.len()]))
             .collect();
 
         Self {

@@ -13,17 +13,40 @@
 
 pub mod app;
 pub mod event;
+pub mod formation;
 pub mod process;
 pub mod procfile;
 pub mod ui;
+use clap::Parser;
+use formation::Formation;
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Specify an alternate location for the application's Procfile.
+    #[arg(short, long)]
+    procfile: Option<PathBuf>,
+
+    /// Specify the number of each process type to run. The value passed in should be in the format process=num,process=num
+    #[arg(short = 'm', long)]
+    formation: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let procfile_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "Procfile".to_string());
+    let args = Args::parse();
+
+    let formation = args.formation.map(Formation::from);
+
+    let procfile_path = if let Some(procfile) = args.procfile {
+        String::from(procfile.to_str().unwrap())
+    } else {
+        String::from("Procfile")
+    };
+
     let terminal = ratatui::init();
-    let result = app::App::new(procfile_path).run(terminal).await;
+    let result = app::App::new(procfile_path, formation).run(terminal).await;
     ratatui::restore();
     result
 }
