@@ -13,6 +13,8 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+#[cfg(unix)]
+use nix::sys::signal::Signal;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::style::Color;
 use std::io::{Read, Write};
@@ -31,6 +33,11 @@ pub struct Process {
     pub sender: Option<Sender<Bytes>>,
     pub master_pty: Option<Box<dyn MasterPty + Send>>,
     pub process_id: Option<u32>,
+    /// Process group of the spawned shell, used to tear down the whole subtree.
+    ///
+    /// Deliberately separate from `process_id`, which the stats refresh
+    /// overwrites with 0 once a lookup fails.
+    pub process_group: Option<u32>,
     pub child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     pub status: ProcessStatus,
     pub exited: Arc<AtomicBool>,
@@ -48,6 +55,11 @@ pub enum ProcessStatus {
 
 impl Process {
     const SCROLLBACK_CAPACITY: usize = 2000;
+    /// How long a process group may take to honour SIGTERM before we force it.
+    #[cfg(unix)]
+    const KILL_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(3);
+    #[cfg(unix)]
+    const KILL_POLL: tokio::time::Duration = tokio::time::Duration::from_millis(50);
 
     pub fn new(name: String, command: String, color: Color) -> Self {
         Self {
@@ -58,6 +70,7 @@ impl Process {
             sender: None,
             master_pty: None,
             process_id: None,
+            process_group: None,
             child_killer: None,
             status: ProcessStatus::Stopped,
             exited: Arc::new(AtomicBool::new(false)),
@@ -122,6 +135,10 @@ impl Process {
             .spawn_command(cmd)
             .context("Failed to spawn command")?;
         self.process_id = child.process_id();
+        // portable-pty calls setsid() in the child, so the shell leads a fresh
+        // session and its pid doubles as the process group id that every
+        // descendant inherits.
+        self.process_group = child.process_id();
         self.child_killer = Some(child.clone_killer());
 
         let exited_clone = self.exited.clone();
@@ -177,6 +194,20 @@ impl Process {
     }
 
     pub async fn kill(&mut self) -> Result<()> {
+        // `child_killer` only signals the shell we spawned. Anything it started
+        // in turn (a task runner, a build tool, the service itself) is left
+        // running and reparented to init, so signal the whole process group.
+        #[cfg(unix)]
+        if let Some(pgid) = self.process_group
+            && Self::signal_group(pgid, Some(Signal::SIGTERM)) {
+                let mut waited = tokio::time::Duration::ZERO;
+                while waited < Self::KILL_GRACE && Self::signal_group(pgid, None) {
+                    tokio::time::sleep(Self::KILL_POLL).await;
+                    waited += Self::KILL_POLL;
+                }
+                Self::signal_group(pgid, Some(Signal::SIGKILL));
+            }
+
         if let Some(killer) = &mut self.child_killer {
             let _ = killer.kill();
         }
@@ -184,6 +215,7 @@ impl Process {
         self.master_pty = None;
         self.sender = None;
         self.child_killer = None;
+        self.process_group = None;
         self.status = ProcessStatus::Stopped;
         self.exited.store(true, Ordering::Relaxed);
         self.scrollback = 0;
@@ -192,6 +224,24 @@ impl Process {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         Ok(())
+    }
+
+    /// Signal every process in `pgid`, returning whether the group still exists.
+    ///
+    /// Pass `None` as a liveness probe. Refuses to signal procman's own group,
+    /// which would happen if the child's setsid() had not taken effect.
+    #[cfg(unix)]
+    fn signal_group(pgid: u32, signal: Option<Signal>) -> bool {
+        use nix::errno::Errno;
+        use nix::sys::signal::killpg;
+        use nix::unistd::{Pid, getpgrp};
+
+        let pgid = Pid::from_raw(pgid as i32);
+        if pgid.as_raw() <= 0 || pgid == getpgrp() {
+            return false;
+        }
+
+        killpg(pgid, signal) != Err(Errno::ESRCH)
     }
 
     pub async fn write_input(&mut self, input: Bytes) -> Result<()> {
