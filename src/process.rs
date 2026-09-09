@@ -198,8 +198,8 @@ impl Process {
         // in turn (a task runner, a build tool, the service itself) is left
         // running and reparented to init, so signal the whole process group.
         #[cfg(unix)]
-        if let Some(pgid) = self.process_group {
-            if Self::signal_group(pgid, Some(Signal::SIGTERM)) {
+        if let Some(pgid) = self.process_group
+            && Self::signal_group(pgid, Some(Signal::SIGTERM)) {
                 let mut waited = tokio::time::Duration::ZERO;
                 while waited < Self::KILL_GRACE && Self::signal_group(pgid, None) {
                     tokio::time::sleep(Self::KILL_POLL).await;
@@ -207,7 +207,6 @@ impl Process {
                 }
                 Self::signal_group(pgid, Some(Signal::SIGKILL));
             }
-        }
 
         if let Some(killer) = &mut self.child_killer {
             let _ = killer.kill();
